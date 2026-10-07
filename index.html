@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>a2a.family — network dashboard</title>
+<style>
+  :root{--bg:#060708;--fg:#e7e9ea;--mut:#8b9095;--line:#1e2124;--acc:#98FB59;--warn:#FFC46E;--bad:#FF8FB1;--card:#0d0f11}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+  .wrap{max-width:1080px;margin:0 auto;padding:28px 18px 64px}
+  h1{font-size:20px;margin:0 0 4px;letter-spacing:-.02em}
+  .sub{color:var(--mut);margin:0 0 24px}
+  .sub a{color:var(--acc)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:26px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .stat b{display:block;font-size:22px;letter-spacing:-.02em}
+  .stat span{color:var(--mut);font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:30px 0 10px}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);white-space:nowrap}
+  th{color:var(--mut);font-weight:500;font-size:11px;text-transform:uppercase;letter-spacing:.06em}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .scroll{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
+  .scroll table{border:0}
+  a{color:var(--acc);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .pill{display:inline-block;padding:1px 7px;border-radius:99px;font-size:11px;border:1px solid var(--line)}
+  .ok{color:var(--acc)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+  .note{background:var(--card);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:8px;padding:12px 14px;color:var(--mut);margin:18px 0}
+  .note b{color:var(--fg)}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .bar{height:6px;background:var(--line);border-radius:99px;overflow:hidden;flex:1;min-width:120px}
+  .bar i{display:block;height:100%;background:var(--acc)}
+  footer{color:var(--mut);font-size:11.5px;margin-top:36px;border-top:1px solid var(--line);padding-top:14px}
+  .err{color:var(--bad)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>a2a.family · network dashboard</h1>
+  <p class="sub">Live from <a href="https://api.a2a.family" target="_blank" rel="noopener">api.a2a.family</a> — settlements, agents and quests. Read-only, no keys, no wallet. Refreshes every 30s.</p>
+
+  <div class="grid" id="stats"></div>
+  <div id="health"></div>
+
+  <h2>Settlement feed</h2>
+  <div class="scroll"><table id="feed"><thead><tr>
+    <th>time</th><th>agent</th><th>skill</th><th>caller</th><th>payer</th><th class="num">usd</th><th class="num">ms</th><th>tx</th>
+  </tr></thead><tbody></tbody></table></div>
+
+  <h2>Payer concentration</h2>
+  <div id="payers"></div>
+
+  <h2>Agents</h2>
+  <div class="scroll"><table id="agents"><thead><tr>
+    <th>agent</th><th>status</th><th class="num">price</th><th>accepts</th><th class="num">last ms</th><th>last ok</th><th>card</th>
+  </tr></thead><tbody></tbody></table></div>
+
+  <h2>Quests</h2>
+  <div id="quests"></div>
+
+  <footer>
+    Data: <code>GET /stats</code>, <code>GET /feed</code>, <code>GET /agents</code>, <code>GET /quests</code> on api.a2a.family.
+    Explorer links go to robinhoodchain.blockscout.com. Not affiliated with a2a.family.
+    <span id="built"></span>
+  </footer>
+</div>
+
+<script>
+const API = "https://api.a2a.family";
+const $ = s => document.querySelector(s);
+const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const short = a => a ? a.slice(0,6) + "…" + a.slice(-4) : "";
+const num = n => (n == null ? "—" : Number(n).toLocaleString("en-US"));
+const ago = t => { const d = (Date.now() - new Date(t)) / 1000;
+  if (d < 60) return Math.round(d) + "s ago";
+  if (d < 3600) return Math.round(d / 60) + "m ago";
+  if (d < 86400) return (d / 3600).toFixed(1) + "h ago";
+  return (d / 86400).toFixed(1) + "d ago"; };
+
+async function get(path){ const r = await fetch(API + path, {cache:"no-store"}); if(!r.ok) throw new Error(path + " " + r.status); return r.json(); }
+
+function statCard(v, label, cls){ return `<div class="stat"><b class="${cls||""}">${v}</b><span>${label}</span></div>`; }
+
+function renderStats(s){
+  $("#stats").innerHTML = [
+    statCard(num(s.calls24h), "calls 24h"),
+    statCard("$" + num(s.settled24h), "settled 24h"),
+    statCard(num(s.callsAll), "calls all-time"),
+    statCard("$" + num(s.settledAll), "settled all-time"),
+    statCard(num(s.p50ms) + " ms", "p50 latency"),
+    statCard(num(s.live) + "/" + num(s.agents), "agents live"),
+  ].join("");
+}
+
+function renderFeed(rows){
+  const tb = $("#feed tbody");
+  tb.innerHTML = rows.map(r => `<tr>
+    <td title="${esc(r.at)}">${ago(r.at)}</td>
+    <td>${esc(r.agentName || r.agent)}</td>
+    <td>${esc(r.skill)}</td>
+    <td>${esc(r.caller || "—")}</td>
+    <td title="${esc(r.payer)}">${esc(short(r.payer))}</td>
+    <td class="num">$${num(r.usd)}</td>
+    <td class="num">${num(r.ms)}</td>
+    <td><a href="${esc(r.explorer)}" target="_blank" rel="noopener">${esc(short(r.tx))}</a></td>
+  </tr>`).join("");
+}
+
+function renderPayers(rows){
+  const by = {};
+  rows.forEach(r => { by[r.payer] = (by[r.payer] || 0) + 1; });
+  const list = Object.entries(by).sort((a, b) => b[1] - a[1]);
+  const total = rows.length || 1;
+  const top = list[0];
+  const topShare = top ? (100 * top[1] / total) : 0;
+  let cls = topShare > 80 ? "bad" : topShare > 50 ? "warn" : "ok";
+  let html = `<div class="note"><b>${list.length} unique payer${list.length === 1 ? "" : "s"}</b> across the last ${total} settlements.
+    Largest payer <code>${esc(short(top ? top[0] : ""))}</code> accounts for <b class="${cls}">${topShare.toFixed(0)}%</b> of them.
+    ${topShare > 80 ? "That is one wallet driving nearly all activity — treat third-party demand as unproven." : ""}</div>`;
+  html += list.map(([addr, n]) => `<div class="row" style="margin:6px 0">
+      <code>${esc(short(addr))}</code>
+      <div class="bar"><i style="width:${(100 * n / total).toFixed(1)}%"></i></div>
+      <span style="min-width:64px;text-align:right">${n} calls</span>
+    </div>`).join("");
+  $("#payers").innerHTML = html;
+}
+
+function renderAgents(a){
+  const tb = $("#agents tbody");
+  tb.innerHTML = a.map(x => `<tr>
+    <td>${esc(x.name || x.id)}</td>
+    <td><span class="pill ${x.status === "live" ? "ok" : "warn"}">${esc(x.status)}</span></td>
+    <td class="num">${x.price && x.price !== "0" ? "$" + esc(x.price) : "free"}</td>
+    <td>${esc((x.accepts || []).join(", ") || "—")}</td>
+    <td class="num">${num(x.lastMs)}</td>
+    <td title="${esc(x.lastOk)}">${x.lastOk ? ago(x.lastOk) : "—"}</td>
+    <td><a href="${esc(x.cardUrl)}" target="_blank" rel="noopener">card</a></td>
+  </tr>`).join("");
+}
+
+function renderQuests(qs){
+  const pool = qs.reduce((s, q) => s + q.prizes.first + q.prizes.second + q.prizes.third, 0);
+  const ends = qs.length ? new Date(qs[0].endsAt) : null;
+  const left = ends ? Math.max(0, Math.round((ends - Date.now()) / 86400000)) : null;
+  let html = `<div class="note"><b>${qs.length} quests · $${num(pool)} in prizes</b> · ${left} days left
+    · ${qs.reduce((s, q) => s + (q.entries || []).length, 0)} entries submitted.
+    Judged by the team; submit with a wallet signature (no gas).</div>`;
+  html += `<div class="scroll"><table><thead><tr><th>quest</th><th>brief</th><th class="num">1st</th><th class="num">entries</th></tr></thead><tbody>`;
+  html += qs.map(q => `<tr>
+    <td>${esc(q.title)}</td>
+    <td style="white-space:normal;max-width:520px;color:var(--mut)">${esc(q.brief)}</td>
+    <td class="num">$${num(q.prizes.first)}</td>
+    <td class="num">${(q.entries || []).length}</td>
+  </tr>`).join("");
+  html += `</tbody></table></div>`;
+  $("#quests").innerHTML = html;
+}
+
+async function tick(){
+  try {
+    const [s, f, a, q] = await Promise.all([get("/stats"), get("/feed"), get("/agents"), get("/quests")]);
+    renderStats(s); renderFeed(f.rows || []); renderPayers(f.rows || []);
+    renderAgents(a.agents || a); renderQuests(q.quests || []);
+    $("#health").innerHTML = "";
+  } catch (e) {
+    $("#health").innerHTML = `<div class="note err">Fetch failed: ${esc(e.message)} — the API may be rate-limiting or down.</div>`;
+  }
+}
+$("#built").textContent = "Rendered " + new Date().toISOString();
+tick();
+setInterval(tick, 30000);
+</script>
+</body>
+</html>
